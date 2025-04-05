@@ -1,0 +1,22 @@
+{
+  "name": "game-server",
+  "version": "1.0.0",
+  "description": "WebSocket server for Deep Dive game",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "websocket",
+    "multiplayer",
+    "game"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "uuid": "^9.0.1",
+    "ws": "^8.16.0"
+  }
+} 
