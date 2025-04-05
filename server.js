@@ -14,15 +14,16 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server }); // Attach WebSocket server to HTTP server
 
-const clients = new Map(); // Store clients: { ws, id, state }
-const playerStates = new Map(); // Store last known state: { position, rotation, health, ... }
+const clients = new Map(); // Store clients: { ws, id, name, state }
+const playerStates = new Map(); // Store last known state: { position, rotation, health, name, ... }
 
 console.log(`WebSocket server starting on port ${PORT}...`);
 
 wss.on('connection', (ws) => {
     // 1. Assign Unique ID
     const clientId = uuidv4();
-    const clientData = { ws, id: clientId, state: {} };
+    // Add name placeholder initially
+    const clientData = { ws, id: clientId, name: null, state: {} };
     clients.set(clientId, clientData);
     playerStates.set(clientId, {}); // Initialize state
     console.log(`Client connected: ${clientId} (Total: ${clients.size})`);
@@ -33,52 +34,62 @@ wss.on('connection', (ws) => {
     // 3. Send current world state (list of other players) to new client
     const currentState = [];
     playerStates.forEach((state, id) => {
-        // Send state only if it's not empty (player has sent at least one update)
-        if (id !== clientId && Object.keys(state).length > 0) {
-             currentState.push({ id, state });
+        // Only send if state and name exist
+        if (id !== clientId && state.name && Object.keys(state).length > 0) {
+             currentState.push({ id, name: state.name, state }); // <<< Send name
         }
     });
     ws.send(JSON.stringify({ type: 'worldState', payload: { players: currentState } }));
 
-    // 4. Notify others about the new player
-    broadcast({ type: 'playerJoined', payload: { id: clientId, state: {} } }, ws); // Send empty state initially
+    // Don't broadcast join until we have a name (wait for first state update)
+    // broadcast({ type: 'playerJoined', payload: { id: clientId, name: null, state: {} } }, ws);
 
     // 5. Handle Messages from this Client
     ws.on('message', (messageBuffer) => {
         try {
             const message = JSON.parse(messageBuffer.toString());
-            // console.log(`Received from ${clientId}:`, message.type);
 
             switch (message.type) {
                 case 'playerStateUpdate':
-                    // Update server's record of this player's state
-                    playerStates.set(clientId, message.payload);
-                    clientData.state = message.payload; // Also update clientData if needed elsewhere
+                    const firstUpdate = !playerStates.get(clientId)?.name; // Check if name was missing before
+                    const incomingName = message.payload.name || clientData.name || `Player_${clientId.substring(0,4)}`;
 
-                    // Broadcast this update to others
+                    // Update state, including name
+                    const newState = { ...message.payload, name: incomingName };
+                    playerStates.set(clientId, newState);
+                    clientData.state = newState;
+                    if (!clientData.name) clientData.name = incomingName; // Store name definitively
+
+                    // If this was the first update (where name arrived), broadcast join now
+                    if (firstUpdate) {
+                         console.log(`Player ${clientId} identified as ${incomingName}`);
+                         broadcast({ 
+                             type: 'playerJoined', 
+                             payload: { id: clientId, name: incomingName, state: newState } // <<< Send name
+                         }, ws); // Exclude sender from join message
+                    }
+
+                    // Broadcast update (includes name now)
                     broadcast({
                         type: 'playerUpdate',
-                        payload: { id: clientId, state: message.payload }
+                        payload: { id: clientId, state: newState } // State includes name
                     }, ws); // Send to everyone except the sender
                     break;
 
                 case 'chatMessage':
                     if (message.payload && message.payload.text) {
-                        // Basic validation/sanitization on server side too if needed
-                        const text = message.payload.text.substring(0, 100); // Enforce max length
+                        const text = message.payload.text.substring(0, 100); 
                         
-                        // Broadcast the message including the sender's ID
+                        // Broadcast including sender's ID (client will use name from player data)
                         broadcast({
                             type: 'chatMessage',
                             payload: { 
                                 senderId: clientId, 
                                 text: text 
                             }
-                        }); // Send to everyone (including sender for confirmation if desired, or exclude sender)
+                        }); // Send to everyone including sender
                     }
                     break;
-
-                // Add other message types if needed (chat, actions, etc.)
 
                 default:
                     console.log(`Unhandled message type from ${clientId}: ${message.type}`);
@@ -90,35 +101,64 @@ wss.on('connection', (ws) => {
 
     // 6. Handle Client Disconnection
     ws.on('close', () => {
-        console.log(`Client disconnected: ${clientId} (Remaining: ${clients.size - 1})`);
+        const clientName = clientData.name || clientId;
+        console.log(`Client disconnected: ${clientName} (${clientId}) (Remaining: ${clients.size - 1})`);
         clients.delete(clientId);
         playerStates.delete(clientId);
         // Notify others
-        broadcast({ type: 'playerLeft', payload: { id: clientId } }, ws);
+        broadcast({ type: 'playerLeft', payload: { id: clientId } }); // No need to exclude sender here
     });
 
     ws.on('error', (error) => {
         console.error(`WebSocket error for ${clientId}:`, error);
-        // Ensure cleanup happens even on error
         if (clients.has(clientId)) {
+            const name = clients.get(clientId).name || clientId;
             clients.delete(clientId);
             playerStates.delete(clientId);
-            broadcast({ type: 'playerLeft', payload: { id: clientId } }, ws);
+            broadcast({ type: 'playerLeft', payload: { id: clientId } });
         }
     });
 });
 
 // Helper function to broadcast messages
-function broadcast(message, senderWs) {
-    // Avoid sending if message payload is empty (can happen initially)
-    if (message.payload && message.payload.state && Object.keys(message.payload.state).length === 0 && message.type !== 'playerLeft') {
-        // console.log("Skipping broadcast of empty state for", message.type, message.payload.id);
-        return;
+function broadcast(message, senderWs = null) { // Allow explicitly passing null senderWs
+    const payload = message.payload || {};
+    const state = payload.state || {};
+    const senderId = payload.id || (senderWs ? [...clients].find(([id, data]) => data.ws === senderWs)?.[0] : payload.senderId);
+
+    // Avoid sending join messages without a name yet
+    if (message.type === 'playerJoined' && !payload.name) {
+         // console.log("Skipping broadcast of join without name");
+         return;
     }
     
+    // Ensure state always has name if available (for consistency)
+    if (senderId && message.type !== 'playerLeft' && message.type !== 'chatMessage') {
+        const senderData = clients.get(senderId);
+        if (senderData?.name && !state.name) {
+            state.name = senderData.name;
+        }
+    }
+
     const messageString = JSON.stringify(message);
+    
     clients.forEach((client) => {
-        if (client.ws !== senderWs && client.ws.readyState === client.ws.OPEN) {
+        // Determine if this client should receive the message
+        let shouldSend = false;
+        if (client.ws.readyState === client.ws.OPEN) {
+           if (message.type === 'chatMessage' || message.type === 'playerLeft' || message.type === 'playerJoined') {
+              // Broadcast chat, leave, join to everyone (even sender for chat)
+              shouldSend = true; 
+           } else if (message.type === 'playerUpdate' || message.type === 'worldState') {
+              // Send updates only to others
+              shouldSend = client.ws !== senderWs;
+           } else {
+              // Default: send to others unless senderWs is null
+              shouldSend = !senderWs || client.ws !== senderWs;
+           }        
+        }
+
+        if (shouldSend) {
             try {
                  client.ws.send(messageString);
             } catch (error) {
