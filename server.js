@@ -62,6 +62,22 @@ wss.on('connection', (ws) => {
                     }, ws); // Send to everyone except the sender
                     break;
 
+                case 'chatMessage':
+                    if (message.payload && message.payload.text) {
+                        // Basic validation/sanitization on server side too if needed
+                        const text = message.payload.text.substring(0, 100); // Enforce max length
+                        
+                        // Broadcast the message including the sender's ID
+                        broadcast({
+                            type: 'chatMessage',
+                            payload: { 
+                                senderId: clientId, 
+                                text: text 
+                            }
+                        }); // Send to everyone (including sender for confirmation if desired, or exclude sender)
+                    }
+                    break;
+
                 // Add other message types if needed (chat, actions, etc.)
 
                 default:
